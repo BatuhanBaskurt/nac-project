@@ -1,44 +1,48 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 from redis import Redis
-from passlib.hash import bcrypt
 import os, json
 from datetime import datetime, timezone
+from typing import Optional, Any
 
 app = FastAPI(title="NAC Policy Engine")
 
-# DB ve Redis bağlantıları
 engine = create_engine(os.environ["DATABASE_URL"])
 redis = Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
 
-# --- Modeller ---
 class AuthRequest(BaseModel):
-    username: str
-    password: str
+    username: Optional[str] = Field(None, alias="User-Name")
+    password: Optional[str] = Field(None, alias="User-Password")
+    model_config = {"populate_by_name": True}
 
 class AuthorizeRequest(BaseModel):
-    username: str
+    username: Optional[str] = Field(None, alias="User-Name")
+    model_config = {"populate_by_name": True}
 
 class AccountingRequest(BaseModel):
-    username: str
-    nasipaddress: str
-    acctsessionid: str
-    acctstatustype: str
-    acctsessiontime: int = 0
-    acctinputoctets: int = 0
-    acctoutputoctets: int = 0
+    username: Optional[str] = Field(None, alias="User-Name")
+    nasipaddress: Optional[str] = Field(None, alias="NAS-IP-Address")
+    acctsessionid: Optional[str] = Field(None, alias="Acct-Session-Id")
+    acctstatustype: Optional[str] = Field(None, alias="Acct-Status-Type")
+    acctsessiontime: Optional[int] = Field(0, alias="Acct-Session-Time")
+    acctinputoctets: Optional[int] = Field(0, alias="Acct-Input-Octets")
+    acctoutputoctets: Optional[int] = Field(0, alias="Acct-Output-Octets")
+    model_config = {"populate_by_name": True}
 
-# --- Health ---
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# --- Auth ---
 @app.post("/auth")
-def auth(req: AuthRequest):
-    # Rate limiting — 5 yanlış denemede blok
-    rate_key = f"ratelimit:{req.username}"
+async def auth(req: AuthRequest):
+    username = req.username
+    password = req.password
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Missing credentials")
+
+    rate_key = f"ratelimit:{username}"
     attempts = redis.get(rate_key)
     if attempts and int(attempts) >= 5:
         raise HTTPException(status_code=429, detail="Too many attempts")
@@ -46,33 +50,32 @@ def auth(req: AuthRequest):
     with engine.connect() as conn:
         result = conn.execute(
             text("SELECT value FROM radcheck WHERE username=:u AND attribute='Cleartext-Password'"),
-            {"u": req.username}
+            {"u": username}
         ).fetchone()
 
-    if not result or result[0] != req.password:
-        # Yanlış şifre — sayacı artır
+    if not result or result[0] != password:
         redis.incr(rate_key)
-        redis.expire(rate_key, 300)  # 5 dakika blok
+        redis.expire(rate_key, 300)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Başarılı — sayacı sıfırla
     redis.delete(rate_key)
     return {"control": {"Auth-Type": "Accept"}}
 
-# --- Authorize ---
 @app.post("/authorize")
-def authorize(req: AuthorizeRequest):
+async def authorize(req: AuthorizeRequest):
+    username = req.username
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username")
+
     with engine.connect() as conn:
-        # Kullanıcının grubunu bul
         group = conn.execute(
             text("SELECT groupname FROM radusergroup WHERE username=:u"),
-            {"u": req.username}
+            {"u": username}
         ).fetchone()
 
         if not group:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Grubun VLAN atribütlerini bul
         attrs = conn.execute(
             text("SELECT attribute, op, value FROM radgroupreply WHERE groupname=:g"),
             {"g": group[0]}
@@ -81,45 +84,42 @@ def authorize(req: AuthorizeRequest):
     reply = {row[0]: row[2] for row in attrs}
     return {"reply": reply, "group": group[0]}
 
-# --- Accounting ---
 @app.post("/accounting")
-def accounting(req: AccountingRequest):
+async def accounting(req: AccountingRequest):
     now = datetime.now(timezone.utc)
+    username = req.username or "unknown"
+    nasip = req.nasipaddress or "0.0.0.0"
+    sessionid = req.acctsessionid or "unknown"
+    statustype = req.acctstatustype or "unknown"
 
     with engine.begin() as conn:
-        if req.acctstatustype == "Start":
+        if statustype == "Start":
             conn.execute(text("""
                 INSERT INTO radacct (acctsessionid, acctuniqueid, username, nasipaddress,
                     acctstarttime, acctstatustype)
                 VALUES (:sid, :uid, :u, :nas, :start, :status)
             """), {
-                "sid": req.acctsessionid,
-                "uid": req.acctsessionid,
-                "u": req.username,
-                "nas": req.nasipaddress,
-                "start": now,
-                "status": req.acctstatustype
+                "sid": sessionid, "uid": sessionid,
+                "u": username, "nas": nasip,
+                "start": now, "status": statustype
             })
-            # Redis'e aktif oturum ekle
-            redis.setex(f"session:{req.acctsessionid}", 86400,
-                json.dumps({"username": req.username, "start": str(now)}))
+            redis.setex(f"session:{sessionid}", 86400,
+                json.dumps({"username": username, "start": str(now)}))
 
-        elif req.acctstatustype == "Stop":
+        elif statustype == "Stop":
             conn.execute(text("""
                 UPDATE radacct SET acctstoptime=:stop, acctsessiontime=:dur,
                     acctinputoctets=:in, acctoutputoctets=:out, acctstatustype=:status
                 WHERE acctsessionid=:sid
             """), {
-                "stop": now, "dur": req.acctsessiontime,
-                "in": req.acctinputoctets, "out": req.acctoutputoctets,
-                "status": req.acctstatustype, "sid": req.acctsessionid
+                "stop": now, "dur": req.acctsessiontime or 0,
+                "in": req.acctinputoctets or 0, "out": req.acctoutputoctets or 0,
+                "status": statustype, "sid": sessionid
             })
-            # Redis'ten oturumu sil
-            redis.delete(f"session:{req.acctsessionid}")
+            redis.delete(f"session:{sessionid}")
 
     return {"status": "ok"}
 
-# --- Kullanıcı listesi ---
 @app.get("/users")
 def get_users():
     with engine.connect() as conn:
@@ -130,7 +130,6 @@ def get_users():
         """)).fetchall()
     return [{"username": u[0], "group": u[1]} for u in users]
 
-# --- Aktif oturumlar ---
 @app.get("/sessions/active")
 def active_sessions():
     keys = redis.keys("session:*")
@@ -140,3 +139,9 @@ def active_sessions():
         if data:
             sessions.append(json.loads(data))
     return sessions
+
+@app.post("/debug")
+async def debug(request: Request):
+    body = await request.json()
+    print("DEBUG BODY:", body)
+    return body

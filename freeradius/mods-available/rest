@@ -1,21 +1,35 @@
 rest {
     connect_uri = "http://api:8000"
+    connect_timeout = 5.0
 
     authenticate {
         uri = "${..connect_uri}/auth"
         method = 'post'
         body = 'json'
+        timeout = 5.0
     }
 
     authorize {
-        uri = "${..connect_uri}/authorize"
+        uri = "${..connect_uri}/debug"
         method = 'post'
         body = 'json'
+        timeout = 5.0
     }
 
     accounting {
         uri = "${..connect_uri}/accounting"
         method = 'post'
         body = 'json'
+        timeout = 5.0
+    }
+
+    pool {
+        start = 0
+        min = 0
+        max = 10
+        spare = 3
+        uses = 0
+        lifetime = 0
+        idle_timeout = 60
     }
 }
