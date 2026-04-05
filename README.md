@@ -13,23 +13,6 @@ PostgreSQL               Redis
 (Kullanıcılar,          (Oturum cache,
 VLAN, Accounting)       Rate limiting)
 
-## 🗂️ Klasör Yapısı
-nac-project/
-├── api/
-│   └── main.py                  # FastAPI policy engine
-├── freeradius/
-│   ├── Dockerfile
-│   ├── clients.d/
-│   │   └── local.conf           # NAS client tanımları
-│   ├── mods-available/
-│   │   └── rest                 # REST modülü config
-│   └── sites-available/
-│       └── default              # Virtual server config
-├── postgres/
-│   └── init.sql                 # Veritabanı şeması ve test verileri
-├── docker-compose.yml
-├── .env.example
-└── README.md
 
 ## ⚙️ Kurulum
 
