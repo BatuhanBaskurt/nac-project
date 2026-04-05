@@ -38,7 +38,7 @@ async def authorize(request: Request):
 
     with engine.connect() as conn:
         result = conn.execute(
-            text("SELECT value FROM radcheck WHERE username=:u AND attribute='Cleartext-Password'"),
+            text("SELECT value FROM radcheck WHERE username=:u AND attribute='Bcrypt-Password'"),
             {"u": username}
         ).fetchone()
 
@@ -48,7 +48,8 @@ async def authorize(request: Request):
             raise HTTPException(status_code=404, detail="User not found")
 
         # Şifre kontrolü
-        if password and result[0] != password:
+        import bcrypt as _bcrypt
+        if password and not _bcrypt.checkpw(password.encode(), result[0].encode()):
             redis.incr(rate_key)
             redis.expire(rate_key, 300)
             raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -81,7 +82,7 @@ async def auth(request: Request):
 
     with engine.connect() as conn:
         result = conn.execute(
-            text("SELECT value FROM radcheck WHERE username=:u AND attribute='Cleartext-Password'"),
+            text("SELECT value FROM radcheck WHERE username=:u AND attribute='Bcrypt-Password'"),
             {"u": username}
         ).fetchone()
 

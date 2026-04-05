@@ -56,9 +56,9 @@ CREATE TABLE IF NOT EXISTS radacct (
 
 -- Test kullanıcıları
 INSERT INTO radcheck (username, attribute, op, value) VALUES
-('admin',    'Cleartext-Password', ':=', 'admin123'),
-('employee', 'Cleartext-Password', ':=', 'emp123'),
-('guest',    'Cleartext-Password', ':=', 'guest123');
+('admin',    'Bcrypt-Password', ':=', '$2b$12$jjNdREFHv1cpJFoAyLgueOnepLzCXOyrw45oH8nR9zMdp6ofHV28K'),
+('employee', 'Bcrypt-Password', ':=', '$2b$12$zujV9FunstnjEGEtTGxlB.33lKDd3e8O4wnnOLlmcJtWSfGs0yyQC'),
+('guest',    'Bcrypt-Password', ':=', '$2b$12$8o1uAJ.Sj/vaqbQ0/AcCWe9Nu69p1iMeQrvfSI.R41y3/w.O6a6MW');
 
 INSERT INTO radusergroup (username, groupname) VALUES
 ('admin',    'admin'),
