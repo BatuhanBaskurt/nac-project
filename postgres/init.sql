@@ -54,9 +54,7 @@ CREATE TABLE IF NOT EXISTS radacct (
     acctstatustype VARCHAR(25)
 );
 
--- Test kullanıcıları ekle
--- Şifreler bcrypt ile hash'lenmiş, gerçek şifreler aşağıda:
--- admin:admin123, employee:emp123, guest:guest123
+-- Test kullanıcıları
 INSERT INTO radcheck (username, attribute, op, value) VALUES
 ('admin',    'Cleartext-Password', ':=', 'admin123'),
 ('employee', 'Cleartext-Password', ':=', 'emp123'),
