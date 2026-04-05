@@ -10,7 +10,7 @@ rest {
     }
 
     authorize {
-        uri = "${..connect_uri}/debug"
+        uri = "${..connect_uri}/authorize"
         method = 'post'
         body = 'json'
         timeout = 5.0

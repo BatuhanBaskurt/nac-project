@@ -21,8 +21,7 @@ server default {
     }
 
     authenticate {
-        Auth-Type PAP {
-            pap
+        Auth-Type Accept {
         }
     }
 

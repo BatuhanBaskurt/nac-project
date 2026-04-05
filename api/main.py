@@ -1,47 +1,36 @@
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 from redis import Redis
 import os, json
 from datetime import datetime, timezone
-from typing import Optional, Any
+from typing import Optional
 
 app = FastAPI(title="NAC Policy Engine")
 
 engine = create_engine(os.environ["DATABASE_URL"])
 redis = Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
 
-class AuthRequest(BaseModel):
-    username: Optional[str] = Field(None, alias="User-Name")
-    password: Optional[str] = Field(None, alias="User-Password")
-    model_config = {"populate_by_name": True}
-
-class AuthorizeRequest(BaseModel):
-    username: Optional[str] = Field(None, alias="User-Name")
-    model_config = {"populate_by_name": True}
-
-class AccountingRequest(BaseModel):
-    username: Optional[str] = Field(None, alias="User-Name")
-    nasipaddress: Optional[str] = Field(None, alias="NAS-IP-Address")
-    acctsessionid: Optional[str] = Field(None, alias="Acct-Session-Id")
-    acctstatustype: Optional[str] = Field(None, alias="Acct-Status-Type")
-    acctsessiontime: Optional[int] = Field(0, alias="Acct-Session-Time")
-    acctinputoctets: Optional[int] = Field(0, alias="Acct-Input-Octets")
-    acctoutputoctets: Optional[int] = Field(0, alias="Acct-Output-Octets")
-    model_config = {"populate_by_name": True}
+def get_val(body: dict, key: str) -> Optional[str]:
+    field = body.get(key)
+    if not field:
+        return None
+    val = field.get("value", [])
+    return val[0] if val else None
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-@app.post("/auth")
-async def auth(req: AuthRequest):
-    username = req.username
-    password = req.password
+@app.post("/authorize")
+async def authorize(request: Request):
+    body = await request.json()
+    username = get_val(body, "User-Name")
+    password = get_val(body, "User-Password")
 
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="Missing credentials")
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username")
 
+    # Rate limiting
     rate_key = f"ratelimit:{username}"
     attempts = redis.get(rate_key)
     if attempts and int(attempts) >= 5:
@@ -53,44 +42,66 @@ async def auth(req: AuthRequest):
             {"u": username}
         ).fetchone()
 
-    if not result or result[0] != password:
-        redis.incr(rate_key)
-        redis.expire(rate_key, 300)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        if not result:
+            redis.incr(rate_key)
+            redis.expire(rate_key, 300)
+            raise HTTPException(status_code=404, detail="User not found")
 
-    redis.delete(rate_key)
-    return {"control": {"Auth-Type": "Accept"}}
+        # Şifre kontrolü
+        if password and result[0] != password:
+            redis.incr(rate_key)
+            redis.expire(rate_key, 300)
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
-@app.post("/authorize")
-async def authorize(req: AuthorizeRequest):
-    username = req.username
-    if not username:
-        raise HTTPException(status_code=400, detail="Missing username")
+        redis.delete(rate_key)
 
-    with engine.connect() as conn:
         group = conn.execute(
             text("SELECT groupname FROM radusergroup WHERE username=:u"),
             {"u": username}
         ).fetchone()
 
-        if not group:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        attrs = conn.execute(
-            text("SELECT attribute, op, value FROM radgroupreply WHERE groupname=:g"),
-            {"g": group[0]}
-        ).fetchall()
+        attrs = []
+        if group:
+            attrs = conn.execute(
+                text("SELECT attribute, op, value FROM radgroupreply WHERE groupname=:g"),
+                {"g": group[0]}
+            ).fetchall()
 
     reply = {row[0]: row[2] for row in attrs}
-    return {"reply": reply, "group": group[0]}
+    return {"reply": reply}
+
+@app.post("/auth")
+async def auth(request: Request):
+    body = await request.json()
+    username = get_val(body, "User-Name")
+    password = get_val(body, "User-Password")
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Missing credentials")
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT value FROM radcheck WHERE username=:u AND attribute='Cleartext-Password'"),
+            {"u": username}
+        ).fetchone()
+
+    if not result or result[0] != password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {"control": {"Auth-Type": "Accept"}}
 
 @app.post("/accounting")
-async def accounting(req: AccountingRequest):
+async def accounting(request: Request):
+    body = await request.json()
     now = datetime.now(timezone.utc)
-    username = req.username or "unknown"
-    nasip = req.nasipaddress or "0.0.0.0"
-    sessionid = req.acctsessionid or "unknown"
-    statustype = req.acctstatustype or "unknown"
+
+    username = get_val(body, "User-Name") or "unknown"
+    nasip = get_val(body, "NAS-IP-Address") or "0.0.0.0"
+    sessionid = get_val(body, "Acct-Session-Id") or "unknown"
+    statustype = get_val(body, "Acct-Status-Type") or "unknown"
+    sessiontime = int(get_val(body, "Acct-Session-Time") or 0)
+    inputoctets = int(get_val(body, "Acct-Input-Octets") or 0)
+    outputoctets = int(get_val(body, "Acct-Output-Octets") or 0)
 
     with engine.begin() as conn:
         if statustype == "Start":
@@ -112,8 +123,8 @@ async def accounting(req: AccountingRequest):
                     acctinputoctets=:in, acctoutputoctets=:out, acctstatustype=:status
                 WHERE acctsessionid=:sid
             """), {
-                "stop": now, "dur": req.acctsessiontime or 0,
-                "in": req.acctinputoctets or 0, "out": req.acctoutputoctets or 0,
+                "stop": now, "dur": sessiontime,
+                "in": inputoctets, "out": outputoctets,
                 "status": statustype, "sid": sessionid
             })
             redis.delete(f"session:{sessionid}")
@@ -139,9 +150,3 @@ def active_sessions():
         if data:
             sessions.append(json.loads(data))
     return sessions
-
-@app.post("/debug")
-async def debug(request: Request):
-    body = await request.json()
-    print("DEBUG BODY:", body)
-    return body
